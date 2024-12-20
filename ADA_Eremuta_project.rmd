@@ -1,0 +1,999 @@
+---
+title: "Advanced Data Analysis 2021"
+author: "Eremuta Maria"
+date: " Last updated: `r format(Sys.time(), '%d %B %Y')`."
+output: 
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  pdf_document:
+    toc: yes
+---
+
+<style>
+body{
+  background: #d8f3dc;
+  color: #1b4332;
+  font-family: Garamond, serif;
+  font-size: 18px;
+}
+pre.r{
+  background: #95d5b2;
+  color: #081c15
+}
+pre:not([class]) {
+    background-color: #b7e4c7
+}
+
+.hljs-number {
+    color:#081c15;
+}
+
+.hljs-keyword {
+    color: #1b4332;
+    font-weight: bold;
+}
+
+h1{
+  color: #081c15;
+  font-weight: bold;
+  font-size: 30px;
+}
+#header{
+  color: #52b788;
+  font-weight: bold;
+  text-align: center;
+}
+
+#header h1{
+  color: #52b788;
+  font-weight: bold;
+  
+}
+#header h4{
+  font-weight: bold;
+  
+}
+
+.list-group-item.active, .list-group-item.active:focus, .list-group-item.active:hover {
+    z-index: 2;
+    color: #d8f3dc;
+    background-color: #52b788;
+    border-color: #52b788;
+    font-weight: bold;
+}
+
+.btn-default {
+    color: #d8f3dc;
+    background-color: #52b788;
+    border-color: #081c15;
+}
+
+.btn-default:hover {
+    color: #d8f3dc;
+    background-color: #52b788;
+    border-color: #081c15;
+}
+
+.tocify {
+    border-radius: 30px;
+}
+
+h2 {
+    font-size: 28px;
+}
+
+.hljs-string {
+    color: #ffffff;
+}
+img {
+    border-radius: 15px;
+}
+
+
+</style>
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Part 1
+
+
+In this project I will analyze such political action as attending demonstrations. I will explore which predictors are important in predicting this outcome, which models work better, and how do the missings influence my analysis. 
+
+
+First of all I have to attach all the necessary libraries:
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(Hmisc)
+library(naniar)
+library(sjlabelled)
+library(qwraps2)
+library(kableExtra)
+library(knitr)
+library(rmarkdown)
+library(jtools)
+library(equatiomatic)
+#library(broom)
+library(caret)
+library(pROC)
+library(car)
+library(margins)
+library(ranger)
+library(rpart)
+library(partykit)
+library(rpart.plot)
+library(mice)
+library(VIM)
+library(sjPlot)
+library(generalhoslem)
+library(boot)
+library(tidyr)
+```
+
+
+
+Here I download all the data to be able to choose my own variables. 
+
+
+```{r}
+full = readRDS("~/data/ruwvs_full.rds")
+var.labels <- attr(full, "variable.labels")
+
+full = full %>% 
+  sjlabelled::remove_all_labels() %>% 
+  tibble()
+```
+
+
+## Preparation step
+
+
+I have decided to select all variables from the suggested list in the preparation script. Since I have used the full dataset with observations for Russia, I have to make the same transformations for the variables of income groups and education. Additionally, I have converted age into numeric variable.
+
+Here I have also added some other variables, namely **Q260** (gender) and **Q252** (satisfaction with political system), I am going to describe them further. 
+
+
+```{r}
+logreg = full %>% dplyr::select(Q211bi, Q199, Q275R, G_TOWNSIZE2, H_SETTLEMENT, Q288, N_REGION_WVS, Q262, Q260, Q252)
+
+
+logreg$incomeN <- case_when(logreg$Q288 == "Lower step" ~ 0, 
+                         logreg$Q288 == "second step" ~ 1, 
+                         logreg$Q288 == "Third step" ~ 2, 
+                         logreg$Q288 == "Fourth step" ~ 3, 
+                         logreg$Q288 == "Fifth step" ~ 4, 
+                         logreg$Q288 == "Sixth step" ~ 5, 
+                         logreg$Q288 == "Seventh step" ~ 6, 
+                         logreg$Q288 == "Eight  step" ~ 7, 
+                         logreg$Q288 == "Nineth step" ~ 8, 
+                         logreg$Q288 == "Tenth step" ~ 9)
+
+
+logreg$eduT <- as.factor(case_when(logreg$Q275R != "Tertiary" ~ "0", 
+                      logreg$Q275R == "Tertiary" ~ "1"))
+logreg$polSatisfN = as.numeric(logreg$Q252)
+logreg$Q262 = as.numeric(as.character(logreg$Q262))
+Hmisc::label(logreg) = as.list(var.labels[match(names(logreg), names(var.labels))])
+names(logreg) <- c("Q211", "intinpol", "eduR", "townsize", "settlement", "income", "region", "age", "gender", "polSatisf", "incomeN", "eduT", "polSatisfN")
+Hmisc::label(logreg$polSatisfN) = var.labels["Q252"]
+```
+
+Now I am going to briefly look through the missings in the variables. Here is the table with the number of missings by variables and the percentage. 
+
+
+```{r}
+miss_var_summary(logreg[,1:10]) %>% dplyr::filter( n_miss>0 ) %>% kable(align = 'c') %>% kable_styling()
+logreg_na = logreg
+logreg_na$complete = logreg %>% complete.cases()
+logreg = logreg %>% na.omit()
+na_sum = sum(logreg_na$complete == FALSE)
+```
+
+So here we can see that only 4 variables (excluding those which have been created by me) contain missing values. The highest number of missings is in the *polSatisf*, which refers to the variable Q252: 
+
+> On a scale from 1 to 10 where “1” is “not satisfied at all” and “10” is “completely satisfied”, how satisfied are  you with how the political system is functioning in your country these days?
+
+Overall, we have `r na_sum` not complete cases here, and I am excluding them for this part of analysis. 
+
+
+
+## An explaratory analysis
+
+
+As the first step in the my explaratory analysis I have decided to include very detailed summary table of my variables. Here in the first column we see the name of the variable. For the factor or character variables it shows the levels of the variable, and for the numeric variables it shows the average value. The data are divided into two groups by the variable of interest (Q211): in the column 2 we have proportions and percentages of those who is not taking part in demonstrations, and in column 3 we have an information on those who is taking part in demonstrations. 
+
+
+```{r results = "asis"}
+options(qwraps2_markup = "markdown")
+sum = qsummary(logreg[,c(2:9, 13)],
+           numeric_summaries = list("Average" = "~ round(mean(%s), 2)"),
+           n_perc_args = list(digits = 1, show_symbol = TRUE, show_denom = "always"))
+
+tab = summary_table(logreg, summaries = sum, by = c("Q211"))
+tab
+
+```
+
+It can be seen that there are 923 observations on those people, who do not attend peaceful demonstrations, and 686 observations on those who do attend. 
+
+It is interesting that most of the people who are attending demonstrations are not very interested / somewhat interested in politics. 
+
+Also, from those who attend the demonstrations the proportion of people with higher level of education is bigger than with lower.
+
+The average age is not very different between two groups.
+
+The average satisfaction with politics is lower in the group who attend the demonstrations. 
+
+Actually this table is very useful and contain all necessary information needed to understand my data.
+
+
+
+
+```{r}
+logreg$age = as.numeric(logreg$age)
+logreg$incomeN = as.numeric(logreg$incomeN)
+logreg$polSatisfN = as.numeric(logreg$polSatisfN)
+logreg$intinpol = logreg$intinpol %>% relevel(ref = "Not at all interested")
+```
+
+
+
+Sometimes the vizualization can help to better understand the data.
+
+
+```{r}
+ggplot(logreg)+
+  geom_bar(mapping = aes( as.factor(polSatisfN), fill = Q211), position = "fill")+
+  theme_light()+
+  labs(title = "The structure of satisfaction with political system variable", x= "Political satisfaction")
+```
+
+Here it can be seen that people who have lower satisfaction with political system performance are more likely to attend demonstrations, than those who have higher satisfaction. 
+
+
+```{r}
+ggplot()+
+  geom_boxplot(logreg, mapping=aes(Q211, age))+
+  theme_light()+
+  labs(title = "The age distribution by attending demonstrations")
+```
+
+Here we can see that the distribution of age almost do not differe between those who attend demonstrations and those who do not.
+
+
+```{r}
+ggplot()+
+  geom_boxplot(logreg, mapping=aes(Q211, age))+
+  theme_light()+
+  labs(title = "The age distribution by attending demonstrations")+
+  facet_wrap(~intinpol)
+```
+
+Here we can see the age distribution of those who attend and don't attend the demonstrations, and their interest in politics.
+It can be seen that almost all the distributions are similar within the groups, except for those who are not interested in politics at all. People who are not at all interested in politics and at the same time attend the demonstrations are a bit younger than those who do not attend. Also, among all other groups of interest in politics, this group in general is younger. 
+
+
+```{r}
+ggplot()+
+  geom_boxplot(logreg, mapping=aes(Q211, age))+
+  theme_light()+
+  labs(title = "The age distribution by attending demonstrations")+
+  facet_grid(gender~intinpol)
+```
+
+If we add gender to the previous graph, we can see that male respondents in the group of those who are not at all interested in politics are in general younger than female.
+In the group of those who are very interested in politics both males and females are in general older than in all other groups. 
+
+
+
+
+## Variable selection
+
+
+I have decided to include two variables, which are directly associated with politics, since the variable of interest is representing the form of political action one can take. So two of the necessary variables in my analysis are the interest in politics **intinpol** and the satisfaction with political system performance in the numeric form **polSatisfN**. Now I have to choose two more variables, one numeric and one categorical. To decide which variables are going to be included, I am applying the logistic regression on the whole set of my variables. That will show, which variables might be significant predictors in our case.  
+
+```{r}
+var_sel = glm(Q211~intinpol+townsize+settlement+region+age+gender+incomeN+eduT+polSatisfN, data=logreg, family = "binomial") %>% tab_model( show.ci = FALSE, auto.label = FALSE, show.est = FALSE)
+var_sel
+```
+
+I am only interested in the significance level here, not in the estimates.
+
+Here we can see that among numeric variables there are no significant except the one I have already decided to use. Other two, the age and numeric income, are both not significant. However, I have to take one of them, so I will use the income, since p-value for it is lower than for age, and I suppose that people who have lower income are less satisfied with their life in general, and are more likely to try to change something and take part in some political actions. 
+
+As for the categorical one, here we have two significant variables, namely the town size and the settlement type. Both of them are similar in a way, but in my point of view, the settlement type is easier to understand. Moreover, it might give more information on the context, and also the levels of this variable have lower significance level, thus I take this variable for the further analysis. 
+
+```{r}
+logreg = logreg %>% dplyr::select(Q211, incomeN, settlement, polSatisfN, intinpol)
+```
+
+
+
+## Model fit
+
+
+
+So here I fit the model step by step, adding one variable each time. Also, I am creating the model with interaction effect of income and satisfaction with political system. 
+
+```{r}
+model_1 = glm(Q211~incomeN, data=logreg, family = "binomial") 
+model_2 = glm(Q211~incomeN+settlement, data=logreg, family = "binomial")
+model_3 = glm(Q211~incomeN+settlement+polSatisfN, data=logreg, family = "binomial")
+model_4 = glm(Q211~incomeN+settlement+polSatisfN+intinpol, data=logreg, family = "binomial")
+model_int = glm(Q211~polSatisfN*incomeN+settlement+intinpol, data=logreg, family = "binomial")
+```
+
+
+Now, when all models are created, we can choose the best one according to the anova.
+
+```{r}
+anova(model_1, model_2, model_3, model_4, model_int, test = "Chisq")
+```
+
+The comparison of models shows that the model with 4 predictors is the best one. However, the interaction effect did not improve my model significantly, so model with interaction effect is worse than without it. Also, the model with 4 variables has the lowest Resid. Dev., which is a good indicator. 
+We can also check the Akaike Information Criterion.
+
+
+```{r}
+AIC(model_1, model_2, model_3, model_4, model_int)
+```
+
+Here the smallest value of AIC also belongs to model_4. I assume that it is the best model among all others here.
+
+
+```{r}
+fml = as.formula(Q211~incomeN+settlement+polSatisfN+intinpol)
+```
+
+
+Here is the equation for my model_4:
+
+
+```{r, results = 'asis'}
+extract_eq(model_4, wrap = T, terms_per_line = 2)
+```
+
+
+
+
+## Diagnostics 
+
+
+First of all I am going to apply Hosmer-Lemeshow Test to search for the evidence of the poor fit. 
+
+
+```{r}
+logitgof(logreg$Q211, fitted(model_4))
+```
+
+The p-value is higher than 0.05, so I assume that the fit of the model is not poor.
+
+
+
+To check the linearity assumption I create the scatter plots with outcome on logit scale and the predictors value. 
+
+
+```{r}
+prob_lin = predict(model_4, type = "response")
+lin <- logreg %>%
+  dplyr::select_if(is.numeric) 
+predictors <- colnames(lin)
+
+lin <- lin %>%
+  mutate(logit = log(prob_lin/(1-prob_lin))) %>%
+  tidyr::gather(key = "predictors", value = "predictor.value", -logit)
+
+ggplot(lin, aes(logit, predictor.value))+
+  geom_point(size = 0.5, alpha = 0.5) +
+  geom_smooth(method = "loess") + 
+  theme_bw() + 
+  facet_wrap(~predictors, scales = "free_y")
+```
+
+Here it can be seen, that there are some problems with linearity in my model. I think it is connected with the scales of my variables. I probably can choose come other variables, or conduct the EFA and CFA to create factor variables which would represent income and political satisfaction on the continuous scale. 
+
+> For now I am interested in exactly these two variables, so I will not change anything, but I should note that this is one of the limitations of my analysis. 
+
+
+To check for multicollinearity, I apply the function vif:
+
+
+```{r}
+car::vif(model_4)
+```
+
+All of the estimates values are not higher than 4, so there is no problem of multicollinearity. 
+
+
+The last thing I am going to check are the outliers.
+
+```{r, message = F, warning = F}
+outlierTest(model_4)
+```
+
+
+It looks like there is no significant outliers in my data, so I do not have to remove anything.
+
+
+## Interpretation
+
+
+Now when I have checked the model fit and done the diagnostics, it's time to interpret the coefficients. I turn them into odds ratios for easier interpretation. Also, here is no need to scale or center my model. 
+
+
+```{r results = "asis"}
+odds = summ(model_4, exp = T, model.info = FALSE, model.fit = FALSE) 
+odds
+```
+
+
+
+In my model all predictors except income are significant. 
+
+Interpretation for the **settlement** type:
+
+> The reference level here is the *Capital city*
+
+* If a person lives in a settlement of type **"Regional center"**, their odds of taking part in demonstrations change by a factor of 0.49, which is decrease by 51% (95% CI = [0.33;0.73]), compared to those who live in a Capital city. 
+* If a person lives in a settlement of type **"District center"**, their odds of taking part in demonstrations change by a factor of 0.34, which is decrease by 66% (95% CI = [0.23;0.50]), compared to those who live in a Capital city. 
+* If a person lives in a settlement of type **"Another city, town (not a regional or district center)"**, their odds of taking part in demonstrations change by a factor of 0.32, which is decrease by 68% (95% CI = [0.16;0.63]), compared to those who live in a Capital city.
+* If a person lives in a settlement of type **"Village"**, their odds of taking part in demonstrations change by a factor of 0.45, which is decrease by 55% (95% CI = [0.31;0.68]), compared to those who live in a Capital city.
+
+
+Interpretation for the **intinpol** (interest in politics):
+
+> The reference level here is the *Not at all interested*
+
+* If a person is **"Very interested"** in politics, their odds of taking part in demonstrations change by a factor of 3.43, which is increase by 243% (95% CI = [2.20;5.35]), compared to those is Not at all interested interested in politics.
+* If a person is **"Somewhat interested"** in politics, their odds of taking part in demonstrations change by a factor of 2.36, which is increase by 136% (95% CI = [1.70;3.28]), compared to those is Not at all interested interested in politics.
+* If a person is **"Not very interested"** in politics, their odds of taking part in demonstrations change by a factor of 2.07, which is increase by 107% (95% CI = [1.49;2.87]), compared to those is Not at all interested interested in politics.
+
+Interpretation for the **polSatisfN** (numeric satisfaction with political system performance):
+
+When polSatisfN increases by one unit, the odds of taking part in demonstrations change by a factor of 0.93, which is decrease by 7% (95% CI = [0.89;0.98]). 
+
+> So I suppose that the person who live in Capital city, who is vety interested in politics and has lowest satisfaction with political system performance would have the highest odds of taking part in the demonstrations. 
+
+
+The next step is to interpret the importance of the predictors by their average marginal effect. 
+
+
+```{r}
+m_ef = margins(model_4, type = "response")
+summary(m_ef) %>% as.data.frame() %>% kable(align = "c") %>% kable_styling()
+```
+
+
+**intinpol:**
+
+For the hypothetical individuals with average values on incomeN (`r mean(logreg$incomeN)`) and polSatisfN (`r mean(logreg$polSatisfN)`), the predicted probability of attending the demonstration is:
+
+* 16% greater for the individual who are **"Not very interested"** in politics 
+* 19% greater for the individual who are **"Somewhat interested"** in politics
+* 28% greater for the individual who are **"Very interested"** in politics
+
+ ... than for those who are Not at all interested.
+ 
+**settlement:**
+ 
+For the hypothetical individuals with average values on incomeN (`r mean(logreg$incomeN)`) and polSatisfN (`r mean(logreg$polSatisfN)`), the predicted probability of attending the demonstration is:
+
+* 27% lower for the individual who live in **"Another city, town (not a regional or district center)"** 
+* 26% lower for the individual who live in **"District center"** 
+* 17% lower for the individual who live in **"Regional center"** 
+* 19% lower for the individual who live in **"Village"** 
+
+ ... than for those who live in Capital city.
+
+
+* One unit increase in **incomeN** may result in 0.9% decrease in predicted probability of attending the demonstration;
+* One unit increase in **polSatisfN** may result in 2% decrease in predicted probability of attending the demonstration.
+
+
+
+## Examples
+
+The next step in the analysis is to create several examples and compute the predicted probability of attending the demonstration.
+
+The first example is the individual with the lowest political satisfaction (1), who live in Capital city, has the lowest income (0), and is very interested in politics.
+
+```{r}
+new_obs = data.frame(polSatisfN = as.numeric(1), settlement = as.factor("Capital city"), incomeN = as.numeric(0), intinpol = as.factor("Very interested"))
+new_prob = predict(model_4, new_obs, type = "response")
+new_prob
+```
+The predicted probability of such individual to attend the demonstration is `r round(new_prob[[1]], 2)`.
+
+
+The second example would be an individual who has the highest political satisfaction (10), lives in Another city, town (not a regional or district center), has the highest income (9), and is not at all interested in politics. 
+
+```{r}
+new_obs = data.frame(polSatisfN = as.numeric(10), settlement = as.factor("Another city, town (not a regional or district center)"), incomeN = as.numeric(9), intinpol = as.factor("Not at all interested"))
+new_prob = predict(model_4, new_obs, type = "response")
+new_prob
+```
+
+The predicted probability of such individual to attend the demonstration is `r round(new_prob[[1]], 2)`.
+
+
+The last example is the individual with the average political satisfaction, the average income, who lives in Capital city and is not at all interested in politics. 
+
+```{r}
+new_obs = data.frame(polSatisfN = as.numeric(mean(logreg$polSatisfN)), settlement = as.factor("Capital city"), incomeN = as.numeric(mean(logreg$incomeN)), intinpol = as.factor("Not at all interested"))
+new_prob = predict(model_4, new_obs, type = "response")
+new_prob
+```
+
+The predicted probability of such individual to attend the demonstration is `r round(new_prob[[1]], 2)`.
+
+
+
+
+## Cross-validation
+
+
+To conduct the cross-validation I have to first split my data on the train and test samples. I am making 80% to be a train sample, and 20% to be a test sample. 
+
+
+```{r}
+set.seed(3) 
+logreg.test.ind = createDataPartition(logreg$Q211, p = 0.2, list = FALSE)
+logreg.test = logreg[logreg.test.ind,]
+logreg.train = logreg[-logreg.test.ind,]
+```
+
+
+Then I am setting the control parameters for the train function. I am going to use 5-folds cross-validation. 
+
+```{r}
+train_control_params <- trainControl(method="cv", number=5)
+```
+
+
+The next step is to train the model on the train data. 
+
+```{r message = F, warning=F}
+model <- caret::train(fml, data=logreg.train, trControl=train_control_params, method="glm", family = binomial(link = 'logit'))
+```
+
+
+Now when the model is trained, it's time to get the predictions.
+
+```{r}
+pred = predict(model, newdata = logreg.test)
+```
+
+
+And the final step is the confusion matrix. It gives the opportunity to estimate how well my model can predict the outcome.
+
+```{r}
+cm_logreg = caret::confusionMatrix(pred, logreg.test$Q211, mode = "prec_recall", positive = "1")
+cm_logreg
+```
+
+> Here I put as the "positive" outcome attending the demonstration (Q211 = 1), so some estimates change due to that fact. 
+
+Overall, we can see that the **accuracy** of my model here is **`r round(cm_logreg$overall[['Accuracy']], 2)`**. This is not that bad. 
+The **Precision** parameter shows the ratio of correctly predicted positive observations to the total predicted positive observations. It indicates the rate of false positive. In my model precision is also rather high: **`r round(cm_logreg$byClass[['Precision']], 2)`**.
+The **Recall** parameter is the ratio of correctly predicted positive observations to the all observations in positive class. In my model recall is **`r round(cm_logreg$byClass[['Recall']], 2)`** which is not good actually. My model often label those who attend demonstrations as those who do not. 
+
+So, it can be seen that in my data there is not the same number of positive and negative events, so that also could be one of the reasons of such results. My model predict well the cases when person do not attend demonstrations though. 
+
+
+The last step in this part is the Receiver Operating Characteristic.
+
+
+```{r}
+roc = roc(response = as.numeric(as.character(logreg.test$Q211)), predictor = as.numeric(as.character(pred))) 
+plot(roc, legacy.axes=T)
+```
+
+
+According to this graph, my model now has poor predictors. The area under the curve is: 
+
+
+```{r}
+pROC::auc(roc)
+```
+
+
+So, overall, I can say that even though I chosed the best model and significant predictors, there still much can be done to improve the situation. 
+
+
+
+
+# Part 2
+
+
+In this part I am going to try the classification tree technique on my data. I am using here train and test datasets as well, to be able to estimate model performance. 
+
+
+## One Tree
+
+First of all I am creating the simple decision tree. On the graph it can be seen, which rules were created by this tree.
+
+```{r}
+tree = rpart(fml, data=logreg.train)
+rpart.plot(tree, extra = "auto", faclen = 5 )
+```
+
+* On the first step, it is checked whether or not the **settlement** type is *Regional center / District center / Another city, town (not a regional or district center) / Village*:
+  + If the answer is "Yes", then we look at the left side of the tree;
+  + If the answer is "No", then we look at the right side of the tree.
+* On the left side, here we also have two more steps:
+  + If the **intinpol** is *Not at all interested*, then the person is predicted to not attend the demonstration;
+  + If the **intinpol** is other than *Not at all interested*, then there is one more step. Those people who have **intinpol** equal to *Somewhat interested / Not very interested* are predicted to not attend demonstrations, and all others (namely, those who are *Very interested* in politics ) are predicted to attend the demonstrations. 
+* On the right side, here is just one step:
+  + Those who have **polSatisfN** less than 3 are expected to not attend the demonstrations, and those who have the value higher or equal to 3 are expected to attend the demonstration.
+
+Now lets look how the tree performs in case of prediction: 
+
+
+```{r}
+predTest.tree = predict(tree, newdata=logreg.test, type = "class")
+tree_cm = caret::confusionMatrix(data = as.factor(predTest.tree), reference = logreg.test$Q211, positive="1", mode = "prec_recall")
+tree_cm
+```
+
+Overall, it can be seen that it works even worse than my first model. The accuracy is **`r round(tree_cm$overall[['Accuracy']], 2)`**, the precision is **`r round(tree_cm$byClass[['Precision']], 2)`**, and the recall is **`r round(tree_cm$byClass[['Recall']], 2)`**. All of the estimates are lower here. Probably, this tree is not suitable for our case. 
+
+## Random Forest
+
+Another way to use trees for such case is the ensemble method Random Forest. It is not possible to visualize it, but I still want to check the results to see whether this method would perform better. I set the algorithm to create 1000 trees. 
+
+```{r}
+set.seed(1111)
+rmod = ranger(fml, data=logreg.train, num.trees = 1000, mtry = 2, importance = 'impurity')
+```
+
+
+And now we can look at the results. 
+
+```{r}
+set.seed(1111)
+predTest.rmod = predict(rmod, logreg.test)
+rmod
+
+rmod_cm = caret::confusionMatrix(data = predTest.rmod$predictions, reference = logreg.test$Q211, positive="1", mode = "prec_recall")
+rmod_cm
+```
+
+It looks like the Random Forest works better than simple tree. The accuracy is **`r round(rmod_cm$overall[['Accuracy']], 2)`** which is closer to the firs model, the precision is **`r round(rmod_cm$byClass[['Precision']], 2)`**, and the recall is **`r round(rmod_cm$byClass[['Recall']], 2)`** which is even better than in case of first model. 
+
+We can look at the importance of predictors for the Random Forest:
+
+```{r}
+#importance(rmod)
+impo = as.data.frame(rmod$variable.importance, row.names = colnames(logreg.train))
+colnames(impo) = "importance"
+arrange(impo, desc(importance)) %>% kable(align = "c") %>% kable_styling()
+```
+
+Surprisingly, the income variable has the highest importance here. The next one is the political satisfaction. 
+
+The Random Forest works better in predicting positive outcomes than the first model. 
+
+
+# Part 3
+
+
+For the last part of my project I create the dataset which again contains all the variables that have been chosen from the beginning in their initial form. Here I have decided to include those variables which I have excluded during my regression analysis. Here is the outcome variable, all of my predictors, education, town size, gender, age and region. They all would be useful in case of imputation. 
+
+
+```{r}
+for_mice = full %>% dplyr::select(Q211bi, Q199, Q275R, G_TOWNSIZE2, H_SETTLEMENT, Q288, N_REGION_WVS, Q262, Q260, Q252) 
+```
+ 
+ 
+
+## Description of missings
+
+
+As I already mentioned in the beginning of my project, the highest number of missings is in the political satisfaction variable. 
+
+```{r}
+aggr_plot = aggr(logreg_na[,1:10], col=c('navyblue','red'), numbers=TRUE, sortVars=TRUE, labels=names(data), cex.axis=.7, gap=3, ylab=c("Histogram of missing data","Pattern"))
+```
+
+
+On the graph it can be also seen that the income has several missings as well. 
+Most of the data are complete. 
+
+**The pattern of missings:**
+
+* The most often only the political satisfaction is not stated.
+* There are also several cases when only one variable is missing.
+* Not stated the political satisfaction and income.
+* Not stated the education and income.
+* Not stated the political satisfaction and interest in politics. 
+* Not stated the political satisfaction, income and interest in politics.
+* Not stated the political satisfaction, income, education and interest in politics.
+
+
+
+## MICE
+
+
+First of all I will deal with MICE algorithm. For the purpose of my analysis I don't need to a lot of datasets of imputed data, so I will use just one. 
+
+```{r}
+set.seed(3)
+mice = mice(for_mice, m=1)
+logreg_mice = mice::complete(mice, 1)
+```
+
+After applying the mice imputation I have to format data in a way they have been used in my previous analysis. 
+
+
+```{r}
+logreg_mice$incomeN <- case_when(logreg_mice$Q288 == "Lower step" ~ 0, 
+                         logreg_mice$Q288 == "second step" ~ 1, 
+                         logreg_mice$Q288 == "Third step" ~ 2, 
+                         logreg_mice$Q288 == "Fourth step" ~ 3, 
+                         logreg_mice$Q288 == "Fifth step" ~ 4, 
+                         logreg_mice$Q288 == "Sixth step" ~ 5, 
+                         logreg_mice$Q288 == "Seventh step" ~ 6, 
+                         logreg_mice$Q288 == "Eight  step" ~ 7, 
+                         logreg_mice$Q288 == "Nineth step" ~ 8, 
+                         logreg_mice$Q288 == "Tenth step" ~ 9)
+
+
+logreg_mice$eduT <- as.factor(case_when(logreg_mice$Q275R != "Tertiary" ~ "0", 
+                      logreg_mice$Q275R == "Tertiary" ~ "1"))
+logreg_mice$polSatisfN = as.numeric(logreg_mice$Q252)
+logreg_mice$Q262 = as.numeric(as.character(logreg_mice$Q262))
+Hmisc::label(logreg_mice) = as.list(var.labels[match(names(logreg_mice), names(var.labels))])
+names(logreg_mice) <- c("Q211", "intinpol", "eduR", "townsize", "settlement", "income", "region", "age", "gender", "polSatisf", "incomeN", "eduT", "polSatisfN")
+Hmisc::label(logreg_mice$polSatisfN) = var.labels["Q252"]
+```
+
+
+The last step is to choose the variables which I have used as predictors and the outcome.
+
+```{r}
+logreg_mice_cut = logreg_mice %>% dplyr::select(Q211, polSatisfN, settlement, incomeN, intinpol)
+logreg_mice_cut$polSatisfN = logreg_mice_cut$polSatisfN %>% as.numeric()
+logreg_mice_cut$incomeN = logreg_mice_cut$incomeN %>% as.numeric()
+logreg_mice_cut$intinpol = logreg_mice_cut$intinpol %>% relevel(ref = "Not at all interested")
+```
+
+Let's check the missings now:
+
+```{r}
+logreg_mice_cut %>% summary()
+```
+
+The summary shows that there is no missing data in our dataset, so the algorithm have done it's work. 
+
+
+
+## K-Nearest Neighbors
+
+
+
+K-Nearest Neighbors technique requires some more steps than MICE to make an imputation. However, it works faster. I set the number of nearest neighbors used to 5.
+
+```{r}
+set.seed(3)
+vars_by_NAs <- for_mice %>%   is.na() %>%  colSums() %>%  sort(decreasing = FALSE) %>%   names()
+knn <- for_mice %>%  dplyr::select(all_of(vars_by_NAs)) %>%   kNN(k = 5)
+```
+
+
+After applying KNN again I have to select my necessary variables and repeat the recoding and other procedures to bring data to proper format. 
+
+
+```{r}
+logreg_knn = knn %>% dplyr::select(Q211bi, Q199, Q275R, G_TOWNSIZE2, H_SETTLEMENT, Q288, N_REGION_WVS, Q262, Q260, Q252)
+
+logreg_knn$incomeN <- case_when(logreg_knn$Q288 == "Lower step" ~ 0, 
+                         logreg_knn$Q288 == "second step" ~ 1, 
+                         logreg_knn$Q288 == "Third step" ~ 2, 
+                         logreg_knn$Q288 == "Fourth step" ~ 3, 
+                         logreg_knn$Q288 == "Fifth step" ~ 4, 
+                         logreg_knn$Q288 == "Sixth step" ~ 5, 
+                         logreg_knn$Q288 == "Seventh step" ~ 6, 
+                         logreg_knn$Q288 == "Eight  step" ~ 7, 
+                         logreg_knn$Q288 == "Nineth step" ~ 8, 
+                         logreg_knn$Q288 == "Tenth step" ~ 9)
+
+
+logreg_knn$eduT <- as.factor(case_when(logreg_knn$Q275R != "Tertiary" ~ "0", 
+                      logreg_knn$Q275R == "Tertiary" ~ "1"))
+logreg_knn$polSatisfN = as.numeric(logreg_knn$Q252)
+logreg_knn$Q262 = as.numeric(as.character(logreg_knn$Q262))
+Hmisc::label(logreg_knn) = as.list(var.labels[match(names(logreg_knn), names(var.labels))])
+names(logreg_knn) <- c("Q211", "intinpol", "eduR", "townsize", "settlement", "income", "region", "age", "gender", "polSatisf", "incomeN", "eduT", "polSatisfN")
+Hmisc::label(logreg_knn$polSatisfN) = var.labels["Q252"]
+
+logreg_knn_cut = logreg_knn %>% dplyr::select(Q211, polSatisfN, settlement, incomeN, intinpol)
+logreg_knn_cut$polSatisfN = logreg_knn_cut$polSatisfN %>% as.numeric()
+logreg_knn_cut$incomeN = logreg_knn_cut$incomeN %>% as.numeric()
+logreg_knn_cut$intinpol = logreg_knn_cut$intinpol %>% relevel(ref = "Not at all interested")
+```
+
+
+Let's again check nissings for the new dataset:
+
+```{r}
+logreg_knn_cut %>% summary()
+```
+
+So the KNN also have done its work and we do not have missing data here. 
+
+
+## Regression
+
+
+Now I will repeat all the steps for the model creation.
+First, creating the train and test datasets for MICE data.
+
+```{r}
+set.seed(3) 
+mice.test.ind = createDataPartition(logreg_mice_cut$Q211, p = 0.2, list = FALSE)
+mice.test = logreg_mice_cut[mice.test.ind,]
+mice.train = logreg_mice_cut[-mice.test.ind,]
+```
+
+Then, I create the glm on the full mice data, and train the model on the mice train dataset.
+
+```{r message = F, warning=F}
+glm_mice = glm(fml, data=logreg_mice_cut, family = "binomial")
+model_mice = caret::train(fml, data=mice.train, method="glm", family = binomial(link = 'logit'))
+```
+
+Then I use the predict function on mice test dataset. 
+
+```{r}
+pred_mice = predict(model_mice, newdata = mice.test)
+```
+
+Finally, I create the confusion matrix for the mice data:
+
+```{r}
+mice_cm = caret::confusionMatrix(pred_mice, mice.test$Q211, mode = "prec_recall", positive = "1")
+mice_cm
+```
+
+Here we see that all the measures are lower than in the first model. The accuracy is **`r round(mice_cm$overall[['Accuracy']], 2)`** which is close to the first model, the precision is **`r round(mice_cm$byClass[['Precision']], 2)`**, and the recall is **`r round(mice_cm$byClass[['Recall']], 2)`**.
+
+The same procedure for the knn dataset.
+
+Train and test samples:
+
+```{r}
+set.seed(3) 
+knn.test.ind = createDataPartition(logreg_knn_cut$Q211, p = 0.2, list = FALSE)
+knn.test = logreg_knn_cut[knn.test.ind,]
+knn.train = logreg_knn_cut[-knn.test.ind,]
+```
+
+Model creation:
+
+```{r message = F, warning=F}
+glm_knn = glm(fml, data=logreg_knn_cut, family = "binomial")
+model_knn <- caret::train(fml, data=knn.train, method="glm", family = binomial(link = 'logit'))
+```
+
+Prediction:
+
+```{r}
+pred_knn = predict(model_knn, newdata = knn.test)
+```
+
+Confusion matrix:
+
+```{r}
+knn_cm = caret::confusionMatrix(pred_knn, knn.test$Q211, mode = "prec_recall", positive = "1")
+knn_cm
+```
+
+This data show the better results than the previous one dataset. The accuracy is **`r round(knn_cm$overall[['Accuracy']], 2)`** which is close to the first model, the precision is **`r round(knn_cm$byClass[['Precision']], 2)`**, and the recall is **`r round(knn_cm$byClass[['Recall']], 2)`**. The recall is still less than in the first model, but the accuracy is a bit higher. 
+
+To be able to compare the models, it is useful to show them side by side:
+
+
+```{r}
+tab_model(model_4, glm_mice, glm_knn, transform = "exp", show.aic= TRUE, show.reflvl = TRUE)
+```
+
+
+In this table it can be seen that the imputation in general did not affect the significance of predictors. The changes in the estimates are also not so huge. Actually, there is only noticeable difference in the estimates for the interest in politics between imputed and not imputed datasets. 
+The directions of the estimates did not change as well.
+Comparing r2 and AIC for the imputed datasets, we can see than the left model performs a bit better than the center one. That is the model on the knn data. 
+
+
+
+## Explore new data
+
+
+To be able to see the changes which imputation brought in the initial dataset I have decided to create summary table of the all data.
+
+
+```{r}
+mice_rbind = logreg_mice_cut %>% dplyr::mutate(type = "mice")
+knn_rbind = logreg_knn_cut %>% dplyr::mutate(type = "knn")
+del_rbind = logreg %>% dplyr::mutate(type = "delete")
+new_logreg = rbind(mice_rbind, knn_rbind, del_rbind)
+```
+
+
+So, in this table we can see names of the variables in the first column, and the summary statistics in the last three columns. 
+Column "delete" show us the data I have used for the first model. Here I removed all NA observations. 
+
+
+```{r results = "asis"}
+options(qwraps2_markup = "markdown")
+sum_rbind = qsummary(new_logreg[,1:5],
+           numeric_summaries = list("Average" = "~ round(mean(%s), 2)"),
+           n_perc_args = list(digits = 1, show_symbol = TRUE, show_denom = "always"))
+
+tab_rbind = summary_table(new_logreg, summaries = sum_rbind, by = c("type"))
+tab_rbind
+
+```
+
+It can be seen that the average political satisfaction is higher for the imputed datasets, but this difference is very small.
+The average income became lower after the imputation. 
+If we look at the structure of the settlement types, it can be seen that the change in proportions in each level is less than 1%. 
+The biggest change is in the interest in politics. After the imputation there in 1% increase in the group of those who are not at all interested in politics, and 1% decrease in those who are somewhat interested, even though the absolute number of cases have increased. 
+Actually we can see that the difference between knn and mice dataset is very small. That might be because of small number of missing cases.
+
+It is easy to see the change in the structure of character variables, but for the numeric ones it is better to make some graphs.
+
+Since the most cases of missing data were in the political satisfaction variable, it is interesting to see the results of imputation for this variable. 
+
+```{r}
+ggplot()+
+  geom_bar(new_logreg, mapping = aes(as.factor(polSatisfN), fill =type), position = 'dodge')+
+  labs(title = "The distribution of political satisfaction by datasets")+
+  theme_light()
+```
+
+We can see that even though the general trends are the same across all 3 datasets, there are still some differences in the number of cases. It looks like the biggest difference is in the group of people with average political satisfaction (5). After the imputation the number of such people have increased on around 50 observations. 
+
+We can also look at the similar graph for the income variable:
+
+```{r}
+ggplot()+
+  geom_bar(new_logreg, mapping = aes(as.factor(incomeN), fill =type), position = 'dodge')+
+  labs(title = "The distribution of income by datasets")+
+  theme_light()
+```
+
+Here we see big difference between delete and imputed datasets in case of groups 2, 3 and 4. 
+
+
+
+## Conclusion 
+
+
+
+It is obvious that due to missings I had to exclude some data observations from my analysis. However, according to the summary table, the general structure of data did not change much after the imputation. It looks like I did not loose much information due to data deletion.
+
+The models built on the imputed datasets show slightly worse results than the dataset with removed missings. 
+
+Also, the MICE method in rather slow even for my small dataset, so it is not very comfortable to use it. 
+
+Both kNN and MICE methods are not that easy to understand, and it is difficult to learn how to apply them correctly. 
+
+For my analysis I believe the deletion of observations with missings is the best way to deal with NAs.
+
+
+
+
+
+
+
+
+
+
+
+
